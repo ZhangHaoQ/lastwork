@@ -1,0 +1,34 @@
+pipeline {
+    agent none // 不在主节点上运行
+    stages {
+        stage('Deploy to Kubernetes') {
+            when {
+                changeset "**/Iac/yaml/*.yaml"
+            }
+            agent {
+                kubernetes {
+                    yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: kubectl
+spec:
+  serviceAccountName: jenkins
+  containers:
+  - name: kubectl-container
+    image: lachlanevenson/k8s-kubectl
+    command:
+    - cat
+    tty: true
+"""
+                }
+            }
+            steps {
+                container('kubectl-container') {
+                    sh 'kubectl apply -f /home/jenkins/agent/workspace/Iac_main/Iac/yaml'
+                }
+            }
+        }
+    }
+}

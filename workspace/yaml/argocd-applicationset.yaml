@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: bookinfo
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: k8s-2
+            url: "https://43.135.10.232:6443"
+          - cluster: k8s-3
+            url: "https://101.33.32.185:6443"
+
+  template:
+    metadata:
+      name: '{{cluster}}-bookinfo' # 'name' field of the Secret
+    spec:
+      project: "default"
+      source:
+        repoURL: https://github.com/ZhangHaoQ/lastwork.git
+        targetRevision: HEAD
+        path: bookinfo
+      destination:
+        server: '{{url}}' # 'server' field of the secret
+        namespace: default
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true

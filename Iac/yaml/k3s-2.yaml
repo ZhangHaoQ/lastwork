@@ -1,0 +1,316 @@
+apiVersion: tf.upbound.io/v1beta1
+kind: Workspace
+metadata:
+  name: k3s-2
+spec:
+  forProvider:
+    module: |
+      resource "tencentcloud_vpc" "tf_vpc" {
+        name       = "tf-vpc2"
+        cidr_block = var.vpc_cidr
+      }
+      
+      resource "tencentcloud_subnet" "tf_service_subnet" {
+        vpc_id            = tencentcloud_vpc.tf_vpc.id
+        name              = "tf_subnet"
+        cidr_block        = var.web_cidr
+        availability_zone = var.availability_zone
+        route_table_id    = tencentcloud_route_table.tf_routetable.id
+      
+        tags = var.tags
+      }
+      
+      resource "tencentcloud_route_table" "tf_routetable" {
+        vpc_id = tencentcloud_vpc.tf_vpc.id
+        name   = "tf-rt2"
+      }
+      
+      data "tencentcloud_images" "default" {
+        image_type = ["PUBLIC_IMAGE"]
+        os_name    = "ubuntu"
+      }
+      
+      data "tencentcloud_instance_types" "default" {
+        filter {
+          name   = "instance-family"
+          values = ["S5"]
+        }
+      
+        filter {
+          name   = "zone"
+          values = ["${var.availability_zone}"]
+        }
+      
+        cpu_core_count = var.cpu
+        memory_size    = var.memory
+      }
+      
+      data "tencentcloud_availability_zones_by_product" "default" {
+        product = "cvm"
+      }
+      
+      
+      # Create a web server without public ip
+      resource "tencentcloud_instance" "ubuntu" {
+        instance_name = "${var.instance_name}-${count.index}"
+        availability_zone = var.availability_zone
+        image_id          = data.tencentcloud_images.default.images.0.image_id
+        instance_type              = data.tencentcloud_instance_types.default.instance_types.0.instance_type
+        system_disk_type           = "CLOUD_SSD"
+        system_disk_size           = 100
+        hostname                   = "${var.instance_name}-${count.index}"
+        vpc_id                     = length(var.vpc_id) > 0 ? var.vpc_id : tencentcloud_vpc.tf_vpc.id
+        subnet_id                  = length(var.subnet_id) > 0 ? var.subnet_id : tencentcloud_subnet.tf_service_subnet.id
+        instance_charge_type       = var.instance_charge_type
+        internet_max_bandwidth_out = 100
+        allocate_public_ip         = true
+        count                      = 1
+        orderly_security_groups    = [tencentcloud_security_group.web_sg.id]
+        password                   = var.password
+        tags = var.tags
+      }
+      
+      resource "tencentcloud_security_group" "default" {
+        name = "tf-default-sg"
+      }
+      
+      resource "tencentcloud_security_group" "web_sg" {
+        name        = "web-sg"
+        description = "make it accessible for both production and stage ports"
+      }
+      
+      resource "tencentcloud_security_group_rule" "all" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "tcp"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "http" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "tcp"
+        port_range        = "80"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "https" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "tcp"
+        port_range        = "443"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "k8s" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "tcp"
+        port_range        = "6443"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "ssh" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "tcp"
+        port_range        = "22"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "ssh_login" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "tcp"
+        port_range        = "2222"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "icmp" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "ingress"
+        cidr_ip           = "0.0.0.0/0"
+        ip_protocol       = "icmp"
+        policy            = "accept"
+      }
+      
+      resource "tencentcloud_security_group_rule" "web_egrees_any" {
+        security_group_id = tencentcloud_security_group.web_sg.id
+        type              = "egress"
+        cidr_ip           = "0.0.0.0/0"
+        policy            = "accept"
+      }
+      
+      
+      # 放通所有端口，在生产环境下请谨慎使用
+      resource "tencentcloud_security_group_lite_rule" "all" {
+        security_group_id = tencentcloud_security_group.default.id
+      
+        ingress = [
+          "ACCEPT#0.0.0.0/0#ALL#TCP",
+        ]
+      
+        egress = [
+          "ACCEPT#0.0.0.0/0#ALL#TCP",
+        ]
+      }
+      
+      module "k3s" {
+        source      = "xunleii/k3s/module"
+        k3s_version = "v1.28.1+k3s1"
+      
+        cidr = {
+          pods = "10.98.0.0/16"
+          services = "10.99.0.0/16"
+        }
+      
+        generate_ca_certificates = true
+        global_flags = [
+          "--tls-san ${tencentcloud_instance.ubuntu[0].public_ip}",
+          "--write-kubeconfig-mode 644",
+          "--disable=traefik",
+          "--kube-controller-manager-arg bind-address=0.0.0.0",
+          "--kube-proxy-arg metrics-bind-address=0.0.0.0",
+          "--kube-scheduler-arg bind-address=0.0.0.0"
+        ]
+        k3s_install_env_vars = {}
+      
+        servers = {
+          "k8s-hongkong-2" = {
+            ip = tencentcloud_instance.ubuntu[0].private_ip
+            connection = {
+              timeout  = "60s"
+              type     = "ssh"
+              host     = tencentcloud_instance.ubuntu[0].public_ip
+              password = var.password
+              user     = var.user
+            }
+          }
+        }
+      }
+      
+      output "vpc_id" {
+        value = tencentcloud_vpc.tf_vpc.id
+      }
+      
+      output "subnet_id" {
+        value = tencentcloud_subnet.tf_service_subnet.id
+      }
+      
+      output "security_group_id" {
+        value = tencentcloud_security_group.default.id
+      }
+      
+      output "kube_config" {
+        value = module.k3s.kube_config
+        sensitive = true
+      }
+      
+      output "kubernetes_ready" {
+        value = module.k3s.kubernetes_ready
+      }
+      
+      output "summary" {
+        value = module.k3s.summary
+      }
+      
+      output "public_ip" {
+        description = "The public ip of instance."
+        value       = tencentcloud_instance.ubuntu[0].public_ip
+      }
+      
+      output "private_ip" {
+        description = "The private ip of instance."
+        value       = tencentcloud_instance.ubuntu[0].private_ip
+      }
+      
+      output "ssh_password" {
+        description = "The SSH password of instance."
+        value       = var.password
+      }
+      
+      variable "password" {
+        type = string
+      }
+      
+      variable "user" {
+        type = string
+      }
+      
+      # Default variables
+      variable "availability_zone" {
+        default = "ap-hongkong-2"
+      }
+      
+      variable "instance_charge_type" {
+        type    = string
+        default = "SPOTPAID"
+      }
+      
+      variable "tags" {
+        description = "A map of the tags to use for the resources that are deployed"
+        type        = map(string)
+      
+        default = {
+          # This value will be the tage text.
+          web = "tf-web"
+          dev = "tf-dev"
+        }
+      }
+      
+      # VPC Info
+      variable "short_name" {
+        default = "tf-vpc"
+      }
+      
+      variable "vpc_cidr" {
+        default = "10.0.0.0/16"
+      }
+      
+      # VSwitch Info
+      variable "web_cidr" {
+        default = "10.0.1.0/24"
+      }
+      
+      # ECS insance variables
+      variable "image_id" {
+        default = ""
+      }
+      
+      variable "instance_name" {
+        default = "terraform-cvm-k8s"
+      }
+      
+      variable "cpu" {
+        default = "2"
+      }
+      
+      variable "memory" {
+        default = "4"
+      }
+      
+      variable "vpc_id" {
+        default = ""
+      }
+      
+      variable "subnet_id" {
+        default = ""
+      }
+    source: Inline
+    vars:
+      - key: password
+        value: password123
+      - key: user
+        value: ubuntu
+      - key: availability_zone
+        value: ap-hongkong-2
+      - key: instance_charge_type
+        value: SPOTPAID
+  providerConfigRef:
+    name: default
